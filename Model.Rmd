@@ -1,0 +1,26 @@
+---
+title: "Project_3_SST"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ncdf4)
+```
+
+```{r init_load}
+# load-in months from data folder (user)
+month_1 <- nc_open("../data/matchups_NPP_2018-01.nc")
+month_2 <- nc_open("../data/matchups_NPP_2018-02.nc")
+month_3 <- nc_open("../data/matchups_NPP_2018-03.nc")
+month_4 <- nc_open("../data/matchups_NPP_2018-04.nc")
+```
+
+```{r eda}
+
+sst <- ncvar_get(month_1, "sst_insitu")
+
+#to see all the variable names in ncdf file:
+head(month_1$var)
+
+```
