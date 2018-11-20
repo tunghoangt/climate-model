@@ -8,19 +8,71 @@ knitr::opts_chunk$set(echo = TRUE)
 library(ncdf4)
 ```
 
+<< INTRODUCE >>
+
+First, we must begin by loading in the data from the netCDF file format containing the measurements over each month. 
+
 ```{r init_load}
 # load-in months from data folder (user)
-month_1 <- nc_open("../data/matchups_NPP_2018-01.nc")
-month_2 <- nc_open("../data/matchups_NPP_2018-02.nc")
-month_3 <- nc_open("../data/matchups_NPP_2018-03.nc")
-month_4 <- nc_open("../data/matchups_NPP_2018-04.nc")
+file_1 <- nc_open("../data/matchups_NPP_2018-01.nc")
+file_2 <- nc_open("../data/matchups_NPP_2018-02.nc")
+file_3 <- nc_open("../data/matchups_NPP_2018-03.nc")
+file_4 <- nc_open("../data/matchups_NPP_2018-04.nc")
 ```
 
-```{r eda}
+Now, what are the variables available to us within the raw data files?
 
-sst <- ncvar_get(month_1, "sst_insitu")
-
-#to see all the variable names in ncdf file:
-head(month_1$var)
-
+```{r data_available}
+print(file_4)
 ```
+
+<< MODEL INTRO >>
+
+<< ADD PROBLEM OF ATMOSPHERIC CORRECTION >>
+
+Anding and Kauth (1970) found that the difference in measurement at properly selected infrared (IR) channels is proportional to the required amount of atmospheric correction.
+
+Barton (1995) used this differential absorption between the channels which is used in all IR sea surface temperature (SST) model. In its basic form it usually represented as:
+
+$$
+T_S = aT_{\lambda_i}+\gamma(T_{\lambda_i}-T_{\lambda_j})+c
+$$
+
+where $T_s$ is estimated SST, $T_{\lambda_i}$ and $T_{\lambda_j}$ are brigthness temperature measurements in channels $\lambda_i$ and $\lambda_j$ where $i\ne j$. Therefore, the trick is to estimated which channels must be used. Both, $a$ and $c$ are constants. Finally, $\gamma$ is defined as
+
+$$
+\gamma=\frac{1-\tau_{\lambda_i}}{\tau_{\lambda_i}-\tau_{\lambda_j}}
+$$
+
+where $\tau$ is the transmittance through the atmosphere from the sea surface to the signal receiving satellite.
+
+Though all statistical models share the above form, various modifications have been made over time to improve performance. One such model is based on the non-linear SST algorithm (NLSST) which was originally developed by Walton et al. (1998) which has the form:
+
+$$
+T_S=b_0+b_1T_{\lambda_i}+b_2(T_{\lambda_i}-T_{\lambda_j})T_{ref}+b_3(T_{\lambda_i}-T_{\lambda_j})(\sec\theta-1)
+$$
+
+where $T_{ref}$ is a best-first-guess SST value and $\sec\theta$ is the satellite zenith angle. 
+
+
+<< PART 1 >>
+
+
+
+
+<< PART 2 >>
+
+
+
+
+<< PART 3 >>
+
+
+
+
+<< PART 4 >>
+
+
+
+
+<< PART 5 >>
