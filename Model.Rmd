@@ -6,29 +6,57 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(ncdf4)
+library(glmnet)
+library(MASS)
+library(ggplot2)
 ```
 
-<< INTRODUCE >>
+### Data Input
 
 First, we must begin by loading in the data from the netCDF file format containing the measurements over each month. 
-
 ```{r init_load}
-# load-in months from data folder (user)
-file_1 <- nc_open("../data/matchups_NPP_2018-01.nc")
-file_2 <- nc_open("../data/matchups_NPP_2018-02.nc")
-file_3 <- nc_open("../data/matchups_NPP_2018-03.nc")
-file_4 <- nc_open("../data/matchups_NPP_2018-04.nc")
+# load-in months from data folder (user-specific)
+locations <- c("../data/matchups_NPP_2018-01.nc", "../data/matchups_NPP_2018-02.nc", 
+               "../data/matchups_NPP_2018-03.nc", "../data/matchups_NPP_2018-04.nc")
+
+# might need to include date structure to chart model performance over time
+bright_3.7 <- vector("numeric")
+bright_8.6 <- vector("numeric")
+bright_11  <- vector("numeric")
+bright_12  <- vector("numeric")
+sec_theta  <- vector("numeric")
+sst_ref    <- vector("numeric")
+sst_reg    <- vector("numeric")
+sst_act    <- vector("numeric")
+hour       <- vector("numeric")
+for( loc in locations ) {
+  open_file <- nc_open( loc )
+  hour       <- c(hour, ncvar_get(open_file, 'hour'))
+  bright_3.7 <- c(bright_3.7, ncvar_get(open_file, 'BT_M12'))
+  bright_8.6 <- c(bright_8.6, ncvar_get(open_file, 'BT_M14'))
+  bright_11  <- c(bright_11, ncvar_get(open_file, 'BT_M15'))
+  bright_12  <- c(bright_12, ncvar_get(open_file, 'BT_M16'))
+  sec_theta  <- c(sec_theta, ncvar_get(open_file, 'vza'))
+  sst_ref    <- c(sst_ref, ncvar_get(open_file, 'sst_ref'))
+  sst_reg    <- c(sst_reg, ncvar_get(open_file, 'sst_reg'))
+  sst_act    <- c(sst_act, ncvar_get(open_file, 'sst_insitu'))
+}
+
+# create data frame
+df    <- data.frame(bright_3.7 = bright_3.7, bright_8.6 = bright_8.6, bright_11 = bright_11,
+                    bright_12 = bright_12, sec_theta = sec_theta, sst_ref = sst_ref, sst_reg = sst_reg,
+                    sst_act = sst_act, hour = hour)
+# indicator of whether it's day time (used in #4 & #5)
+day   <- c(7:17)
+df$is_day   <- as.integer(df$hour %in% day)
 ```
 
-Now, what are the variables available to us within the raw data files?
-
-```{r data_available}
-print(file_4)
+```{r }
+# what does df look like?
+head(df)
 ```
 
-<< MODEL INTRO >>
-
-<< ADD PROBLEM OF ATMOSPHERIC CORRECTION >>
+### Model Introduction
 
 Anding and Kauth (1970) found that the difference in measurement at properly selected infrared (IR) channels is proportional to the required amount of atmospheric correction.
 
@@ -54,25 +82,162 @@ $$
 
 where $T_{ref}$ is a best-first-guess SST value and $\sec\theta$ is the satellite zenith angle. 
 
-
-<< PART 1 >>
-
+### Part 1
 
 
 
-<< PART 2 >>
+### Part 2
 
 
 
-
-<< PART 3 >>
-
+### Part 3
 
 
 
-<< PART 4 >>
+### Part 4
+Adding further variables and segmenting the model based on whether it's day or night we can enrich our model which then requires the estimation of 14 parameters.
 
+In the daytime the model has the form:
+$$
+T_S=b_0+b_1T_{11}+b_2(T_{11}-T_{3.7}) + b_3(T_{11}-T_{8.6})+b_4(T_{11}-T_{12})\\
++(\sec\theta-1)[b_5+b_6T_{11}+b_7(T_{11}-T_{3.7})+b_8(T_{11}-T_{8.6})+b_9(T_{11}-T_{12})]\\
++T_{ref}[b_{10}T_{11}+b_{11}(T_{11}-T_{3.7})+b_{12}(T_{11}-T_{8.6})+b_{13}(T_{11}-T_{12})]
+$$
 
+And, in the evening: 
+$$
+T_S=b_0+b_1T_{11}+b_2(T_{11}-T_{8.6}) +b_3(T_{11}-T_{12})\\
++(\sec\theta-1)[b_4+b_5T_{11}+b_6(T_{11}-T_{8.6})+b_7(T_{11}-T_{12})]\\
++T_{ref}[b_8T_{11}+b_9(T_{11}-T_{8.6})+b_{10}(T_{11}-T_{12})]
+$$
 
+We'll need to make some modifications to our original data to include these differences.
 
-<< PART 5 >>
+```{r df_mod}
+# consider changing if possible based on datetime
+df$diff_11_3.7 <- df$is_day * (df$bright_11 - df$bright_3.7)  # include if daytime indicator
+df$diff_11_8.6 <- df$bright_11 - df$bright_8.6
+df$diff_11_12  <- df$bright_11 - df$bright_12
+head(df)
+```
+
+Notice, the difference between the nighttime and daytime model is the exclusion of the $T_{11}-T_{3.7}$ channel in the evening, so using our indicator variable ```is_day``` we can simplify our implementation.
+
+Now, we must estimate our coefficient vector $\vec{b}$ for each of the models defined above. Here we will use the shrinkage methods of LASSO and Ridge regression. 
+
+#### Model Fitting
+
+Generally, we know that in fitting a model with least squares we need to find the estimates $\vec{b}$ such that
+
+$$
+\vec{b}=\arg \min_b\sum_{i=1}^n{(y_i-b_0-\sum_{j=1}^pb_jx_{ij})^2} 
+$$
+for $i$ observations and $p$ parameters. 
+
+In penalized regression (of which both LASSO and Ridge are specific cases), we want to avoid overfitting, or adding too many $x_j$ to our model if they do not provide a significant benefit. This way we maintain a rich model while not over complicating it unless necessary. In Ridge, then we tackle the following minimization problem:
+$$
+\vec{b}_{Ridge}=\arg \min_b\sum_{i=1}^n{(y_i-b_0-\sum_{j=1}^pb_jx_{ij})^2}+\lambda\sum_{j=1}^pb^2_j 
+$$
+
+where now we have an additional penalty term for adding a parameter to the model.
+
+In LASSO, the minimization problem takes the form:
+$$
+\vec{b}_{LASSO}=\arg \min_b\sum_{i=1}^n{(y_i-b_0-\sum_{j=1}^pb_jx_{ij})^2}+\lambda\sum_{j=1}^p|b_j| 
+$$
+
+Here, the goal is to predict ```sst_insitu``` with maximal accuracy as this is the actual "in the water" temperature that we are attempting to predict. We can then compare the performance of our model with the operational ```sst_reg```.
+
+Within the ```glmnet()``` function of the ```glmnet``` library, the parameter ```alpha``` specifies the elasticnet mixing parameter. The penalty within the function is defined:
+$$
+\frac{(1-\alpha)}{2}\lVert\beta\rVert^2_2+\alpha\lVert\beta\rVert_1
+$$
+
+So, ```alpha=1``` simplifies to the LASSO penalty and ```alpha=0``` = simplifies to the Ridge penalty. The ```glmnet()``` function requires our x variables denoted as a matrix, so let's perform some pre-processing to ensure it runs smoothly.
+
+```{r model_prep}
+# you should consider splitting into test & train sets here
+# asks for independent valdiation, also this dataset is massive
+form  <- formula(sst_act ~ bright_11 + diff_11_3.7 + diff_11_8.6 + diff_11_12 + 
+                     bright_11:sec_theta + diff_11_3.7:sec_theta + diff_11_8.6:sec_theta + diff_11_12:sec_theta +
+                     bright_11:sst_ref + diff_11_3.7:sst_ref + diff_11_8.6:sst_ref + diff_11_12:sst_ref)
+X     <- model.matrix(form, df)
+y     <- as.matrix(df$sst_act, ncol = 1)
+```
+
+Now, we can fit both our LASSO and Ridge models. 
+
+```{r fit}
+# fit models
+fit_lasso <- glmnet::glmnet(X, y, alpha = 1)
+fit_ridge <- glmnet::glmnet(X, y, alpha = 0)
+```
+
+Let's take a look at the step-wise progression plots use the $L_1$ and $L_2$ norm penalties.
+
+```{r pred}
+# make predictions
+sst_lasso <- predict(fit_lasso, X, type = "response")
+sst_ridge <- predict(fit_ridge, X, type = "response")
+```
+
+What about their prediction accuracy? How is it compared to the error from the operational model?
+
+```{r error}
+# create a prediction/performance df to use in the succeeding visualizations
+
+rmse <- function(y_act, y_pred) {
+  return( length(y_pred)^-1 * sum((y_pred - y_act)^2) )
+}
+
+print(list(
+  base_error = rmse(sst_act, sst_reg),
+  lasso_error = rmse(sst_act, sst_lasso),
+  ridge_error = rmse(sst_act, sst_ridge)
+))
+```
+
+What do the pathways for both penalties look like?
+
+```{r model_vis}
+plot(fit_lasso)
+plot(fit_ridge)
+```
+
+#### Model Performance
+
+Finally, we'll investigate the two model's performance against the operational model and the actual temperatures over the time range of data available to us.
+
+```{r shrinkage performance}
+
+```
+
+### Part 5
+Returning to our model that segments depending on time of day from Part 4, perhaps the usage of backward selection would perform just as well, or better. First, we must fit the whole model defined by the form we defined above and step-wise remove a variable by investigating the criteria. The two used here will the Akaike Information Criterion (AIC) and the Bayesian Information Criteria (BIC). The objective is to minimize along the criteria response surface for both. 
+
+In the case of AIC we are fitting to minimize the following:
+
+$$
+AIC = 2p-2\ln(\hat{L})
+$$
+
+where $p$ is the number of parameters within our model and $\hat{L}$ is the maximum of the likelihood for the candidate model. The BIC has a similar form, but different penalty. It is defined:
+
+$$
+BIC = p\ln(n)-2\ln(\hat{L})
+$$
+
+where $n$ is the number of observations.
+
+Let's fit our models:
+
+```{r backward_fit}
+full_lm <- lm(form, data = df)
+fit_AIC <- step(full_lm, directon = "backward", k = 2)
+fit_BIC <- step(full_lm, direction = "backward", k = log(n))
+```
+
+And we can now compare them to our performance using the LASSO and Ridge results from Part 4.
+
+```{r backward_performance}
+```
