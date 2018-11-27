@@ -16,10 +16,10 @@ library(ggplot2)
 First, we must begin by loading in the data from the netCDF file format containing the measurements over each month. 
 ```{r init_load}
 # load-in months from data folder (user-specific)
-locations <- c("../data/matchups_NPP_2018-01.nc", "../data/matchups_NPP_2018-02.nc", 
+locations  <- c("../data/matchups_NPP_2018-01.nc", "../data/matchups_NPP_2018-02.nc", 
                "../data/matchups_NPP_2018-03.nc", "../data/matchups_NPP_2018-04.nc")
 
-# might need to include date structure to chart model performance over time
+# pull in the variables from the files and bind together
 bright_3.7 <- vector("numeric")
 bright_8.6 <- vector("numeric")
 bright_11  <- vector("numeric")
@@ -28,10 +28,10 @@ sec_theta  <- vector("numeric")
 sst_ref    <- vector("numeric")
 sst_reg    <- vector("numeric")
 sst_act    <- vector("numeric")
-hour       <- vector("numeric")
+sza        <- vector("numeric")
 for( loc in locations ) {
-  open_file <- nc_open( loc )
-  hour       <- c(hour, ncvar_get(open_file, 'hour'))
+  open_file  <- nc_open(loc)
+  sza        <- c(sza, ncvar_get(open_file, 'sza'))
   bright_3.7 <- c(bright_3.7, ncvar_get(open_file, 'BT_M12'))
   bright_8.6 <- c(bright_8.6, ncvar_get(open_file, 'BT_M14'))
   bright_11  <- c(bright_11, ncvar_get(open_file, 'BT_M15'))
@@ -43,12 +43,15 @@ for( loc in locations ) {
 }
 
 # create data frame
+# date  <- as.POSIXct(paste0(year, "-", month, "-", day, " ", hour, ":", minute), format = "%Y-%m-%d %H:%M")
 df    <- data.frame(bright_3.7 = bright_3.7, bright_8.6 = bright_8.6, bright_11 = bright_11,
                     bright_12 = bright_12, sec_theta = sec_theta, sst_ref = sst_ref, sst_reg = sst_reg,
-                    sst_act = sst_act, hour = hour)
+                    sst_act = sst_act, sza = sza)
 # indicator of whether it's day time (used in #4 & #5)
-day   <- c(7:17)
-df$is_day   <- as.integer(df$hour %in% day)
+df$is_day   <- as.integer(df$sza < 95)
+
+# clean out by removing all the vectors from this step
+rm(open_file, bright_3.7, bright_8.6, bright_11, bright_12, sec_theta, sst_ref, sst_reg, sst_act, sza)
 ```
 
 ```{r }
@@ -95,7 +98,7 @@ where $T_{ref}$ is a best-first-guess SST value and $\sec\theta$ is the satellit
 
 
 ### Part 4
-Adding further variables and segmenting the model based on whether it's day or night we can enrich our model which then requires the estimation of 14 parameters.
+Adding further variables and segmenting the model based on whether it's day or night using the solar zenith angel ```sza``` to threshold, we can enrich our model which then requires the estimation of 14 parameters.
 
 In the daytime the model has the form:
 $$
@@ -153,53 +156,73 @@ $$
 \frac{(1-\alpha)}{2}\lVert\beta\rVert^2_2+\alpha\lVert\beta\rVert_1
 $$
 
-So, ```alpha=1``` simplifies to the LASSO penalty and ```alpha=0``` = simplifies to the Ridge penalty. The ```glmnet()``` function requires our x variables denoted as a matrix, so let's perform some pre-processing to ensure it runs smoothly.
+So, ```alpha=1``` simplifies to the LASSO penalty and ```alpha=0``` = simplifies to the Ridge penalty. The ```glmnet()``` function requires our x variables denoted as a matrix, so let's perform some pre-processing to ensure it runs smoothly. We'll use different train and tests subsets of our data to get a better sense of out-of-sample performance for our models. 
+
 
 ```{r model_prep}
-# you should consider splitting into test & train sets here
-# asks for independent valdiation, also this dataset is massive
-form  <- formula(sst_act ~ bright_11 + diff_11_3.7 + diff_11_8.6 + diff_11_12 + 
+# split into train & test sets for more robust performance evaluation
+TRAIN_SIZE  <- .7
+train_mask  <- sample.int(n = nrow(df), size = floor(nrow(df) * TRAIN_SIZE), replace = F)
+form        <- formula(sst_act ~ bright_11 + diff_11_3.7 + diff_11_8.6 + diff_11_12 + 
                      bright_11:sec_theta + diff_11_3.7:sec_theta + diff_11_8.6:sec_theta + diff_11_12:sec_theta +
                      bright_11:sst_ref + diff_11_3.7:sst_ref + diff_11_8.6:sst_ref + diff_11_12:sst_ref)
-X     <- model.matrix(form, df)
-y     <- as.matrix(df$sst_act, ncol = 1)
+X_train     <- model.matrix(form, df[train_mask,])
+y_train     <- as.matrix(df$sst_act[train_mask], ncol = 1)
 ```
 
-Now, we can fit both our LASSO and Ridge models. 
+Now, we can fit both our LASSO and Ridge models on our training set and then make predictions on our excluded test set.
 
 ```{r fit}
-# fit models
-fit_lasso <- glmnet::glmnet(X, y, alpha = 1)
-fit_ridge <- glmnet::glmnet(X, y, alpha = 0)
+# what if we change these to not make so many zero'ed coef's?
+fit_lasso <- glmnet::glmnet(X_train, y_train, alpha = 1)
+fit_ridge <- glmnet::glmnet(X_train, y_train, alpha = 0)
 ```
-
-Let's take a look at the step-wise progression plots use the $L_1$ and $L_2$ norm penalties.
 
 ```{r pred}
-# make predictions
-sst_lasso <- predict(fit_lasso, X, type = "response")
-sst_ridge <- predict(fit_ridge, X, type = "response")
+rm(X_train, y_train) # memory management
+X_test         <- model.matrix(form, df[-train_mask,])
+y_test         <- as.matrix(df$sst_act[-train_mask], ncol = 1)
+
+# predict 
+predict_df         <- data.frame(y_actual = y_test)
+predict_df$y_lasso <- predict(fit_lasso, X_test, s = min(fit_lasso$lambda), type = "response")
+predict_df$y_ridge <- predict(fit_ridge, X_test, s = min(fit_ridge$lambda), type = "response")
+rm(X_test, y_test) # memory management
 ```
 
-What about their prediction accuracy? How is it compared to the error from the operational model?
+What about their prediction accuracy on the test set? How is it compared to the error from the operational model? Let's use the root-mean squared error over our test set as the metric, which has the form:
+
+$$
+RMSE=\sqrt{\frac{1}{n}\sum_{i=1}^n(y-\hat{y})^2}
+$$
+
+where $y$ is the actual value and $\hat{y}$ is the corresponding model predicted value.
 
 ```{r error}
-# create a prediction/performance df to use in the succeeding visualizations
-
 rmse <- function(y_act, y_pred) {
-  return( length(y_pred)^-1 * sum((y_pred - y_act)^2) )
+  return( sqrt( length(y_pred)^-1 * sum((y_pred - y_act)^2) ))
 }
 
-print(list(
-  base_error = rmse(sst_act, sst_reg),
-  lasso_error = rmse(sst_act, sst_lasso),
-  ridge_error = rmse(sst_act, sst_ridge)
-))
+# add normalized function
+nrmse <- function(y_act, y_pred) {
+  return( rmse(y_act, y_pred) / mean(y_act) )
+}
+
+error_list <- list(
+  base_rmse = rmse(df$sst_act[-train_mask], df$sst_reg[-train_mask]),
+  lasso_rmse = rmse(df$sst_act[-train_mask], predict_df$y_lasso),
+  ridge_rmse = rmse(df$sst_act[-train_mask], predict_df$y_ridge),
+  base_nrmse = nrmse(df$sst_act[-train_mask], df$sst_reg[-train_mask]), 
+  lasso_nrmse = nrmse(df$sst_act[-train_mask], predict_df$y_lasso),
+  ridge_rmse = nrmse(df$sst_act[-train_mask], predict_df$y_ridge)
+)
+error_list
 ```
 
-What do the pathways for both penalties look like?
+What do the solution pathways for both penalties look like?
 
 ```{r model_vis}
+# other things you want to know here?
 plot(fit_lasso)
 plot(fit_ridge)
 ```
@@ -209,7 +232,7 @@ plot(fit_ridge)
 Finally, we'll investigate the two model's performance against the operational model and the actual temperatures over the time range of data available to us.
 
 ```{r shrinkage performance}
-
+# think of something to do here
 ```
 
 ### Part 5
@@ -232,7 +255,8 @@ where $n$ is the number of observations.
 Let's fit our models:
 
 ```{r backward_fit}
-full_lm <- lm(form, data = df)
+# https://stackoverflow.com/questions/15260429/is-there-a-way-to-compress-an-lm-object-for-later-prediction
+full_lm <- lm(form, data = df[train_mask,]) # why is the output almost 10Gb?
 fit_AIC <- step(full_lm, directon = "backward", k = 2)
 fit_BIC <- step(full_lm, direction = "backward", k = log(n))
 ```
@@ -240,4 +264,16 @@ fit_BIC <- step(full_lm, direction = "backward", k = log(n))
 And we can now compare them to our performance using the LASSO and Ridge results from Part 4.
 
 ```{r backward_performance}
+# predict on test set
+predict_df$y_AIC <- predict()
+predict_df$y_BIC <- predict
+
+# error
+print(list(
+  base_error = rmse(df$sst_act[-train_mask], df$sst_reg[-train_mask]),
+  AIC_error = rmse(df$sst_act[-train_mask], predict_df$y_AIC),
+  BIC_error = rmse(df$sst_act[-train_mask], predict_df$y_BIC)
+))
+
+# visualize error 
 ```
