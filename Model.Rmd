@@ -8,7 +8,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(ncdf4)
 library(glmnet)
 library(MASS)
-library(ggplot2)
+library(biglm)
 ```
 
 ### Data Input
@@ -43,15 +43,15 @@ for( loc in locations ) {
 }
 
 # create data frame
-# date  <- as.POSIXct(paste0(year, "-", month, "-", day, " ", hour, ":", minute), format = "%Y-%m-%d %H:%M")
 df    <- data.frame(bright_3.7 = bright_3.7, bright_8.6 = bright_8.6, bright_11 = bright_11,
                     bright_12 = bright_12, sec_theta = sec_theta, sst_ref = sst_ref, sst_reg = sst_reg,
                     sst_act = sst_act, sza = sza)
-# indicator of whether it's day time (used in #4 & #5)
+# indicator of whether it's day time
 df$is_day   <- as.integer(df$sza < 95)
 
-# clean out by removing all the vectors from this step
+# clean out memory by removing all the vectors from this step
 rm(open_file, bright_3.7, bright_8.6, bright_11, bright_12, sec_theta, sst_ref, sst_reg, sst_act, sza)
+gc(verbose = F)
 ```
 
 ```{r }
@@ -117,7 +117,6 @@ $$
 We'll need to make some modifications to our original data to include these differences.
 
 ```{r df_mod}
-# consider changing if possible based on datetime
 df$diff_11_3.7 <- df$is_day * (df$bright_11 - df$bright_3.7)  # include if daytime indicator
 df$diff_11_8.6 <- df$bright_11 - df$bright_8.6
 df$diff_11_12  <- df$bright_11 - df$bright_12
@@ -156,11 +155,11 @@ $$
 \frac{(1-\alpha)}{2}\lVert\beta\rVert^2_2+\alpha\lVert\beta\rVert_1
 $$
 
-So, ```alpha=1``` simplifies to the LASSO penalty and ```alpha=0``` = simplifies to the Ridge penalty. The ```glmnet()``` function requires our x variables denoted as a matrix, so let's perform some pre-processing to ensure it runs smoothly. We'll use different train and tests subsets of our data to get a better sense of out-of-sample performance for our models. 
-
+So, ```alpha=1``` simplifies to the LASSO penalty and ```alpha=0``` simplifies to the Ridge penalty. The ```glmnet()``` function requires our x variables represented as a matrix, so we'll need to perform some pre-processing to ensure it runs smoothly. We'll use different train and tests subsets of our data to get a better sense of out-of-sample performance for our models. 
 
 ```{r model_prep}
 # split into train & test sets for more robust performance evaluation
+set.seed(42)
 TRAIN_SIZE  <- .7
 train_mask  <- sample.int(n = nrow(df), size = floor(nrow(df) * TRAIN_SIZE), replace = F)
 form        <- formula(sst_act ~ bright_11 + diff_11_3.7 + diff_11_8.6 + diff_11_12 + 
@@ -173,9 +172,9 @@ y_train     <- as.matrix(df$sst_act[train_mask], ncol = 1)
 Now, we can fit both our LASSO and Ridge models on our training set and then make predictions on our excluded test set.
 
 ```{r fit}
-# what if we change these to not make so many zero'ed coef's?
 fit_lasso <- glmnet::glmnet(X_train, y_train, alpha = 1)
 fit_ridge <- glmnet::glmnet(X_train, y_train, alpha = 0)
+rm(X_train, y_train) # memory management
 ```
 
 ```{r pred}
@@ -187,13 +186,14 @@ y_test         <- as.matrix(df$sst_act[-train_mask], ncol = 1)
 predict_df         <- data.frame(y_actual = y_test)
 predict_df$y_lasso <- predict(fit_lasso, X_test, s = min(fit_lasso$lambda), type = "response")
 predict_df$y_ridge <- predict(fit_ridge, X_test, s = min(fit_ridge$lambda), type = "response")
-rm(X_test, y_test) # memory management
+rm(X_test, y_test); gc(verbose=F) # memory management
+head(predict_df)
 ```
 
 What about their prediction accuracy on the test set? How is it compared to the error from the operational model? Let's use the root-mean squared error over our test set as the metric, which has the form:
 
 $$
-RMSE=\sqrt{\frac{1}{n}\sum_{i=1}^n(y-\hat{y})^2}
+RMSE=\sqrt{\frac{1}{n}\sum_{i=1}^n(y_i-\hat{y_i})^2}
 $$
 
 where $y$ is the actual value and $\hat{y}$ is the corresponding model predicted value.
@@ -219,24 +219,33 @@ error_list <- list(
 error_list
 ```
 
-What do the solution pathways for both penalties look like?
+What do the solution pathways for both versions look like?
 
 ```{r model_vis}
-# other things you want to know here?
 plot(fit_lasso)
 plot(fit_ridge)
 ```
 
-#### Model Performance
+What about across the lambda parameters?
 
-Finally, we'll investigate the two model's performance against the operational model and the actual temperatures over the time range of data available to us.
-
-```{r shrinkage performance}
-# think of something to do here
+```{r lambda}
+plot(fit_lasso, xvar = "lambda")
+plot(fit_ridge, xvar = "lambda")
 ```
 
+In order to ensure there is not some interaction present that might threaten the robustness of our model, we can investigate the distribution of our residuals, $\hat{y_i}-y_i$ for both the models. 
+
+```{r hist}
+hist(predict_df$y_ridge - predict_df$y_actual, main = "Ridge Regression Residuals", xlab = "Distance from Actual",
+     col = 3)
+hist(predict_df$y_lasso - predict_df$y_actual, main = "LASSO Regression Residuals", xlab = "Distance from Actual",
+     col = 5)
+```
+
+In both cases, they appear to be relatively normal, which should provide us with further confidence that our model is justifiable. 
+
 ### Part 5
-Returning to our model that segments depending on time of day from Part 4, perhaps the usage of backward selection would perform just as well, or better. First, we must fit the whole model defined by the form we defined above and step-wise remove a variable by investigating the criteria. The two used here will the Akaike Information Criterion (AIC) and the Bayesian Information Criteria (BIC). The objective is to minimize along the criteria response surface for both. 
+Returning to our model that segments depending on time of day from Part 4, perhaps the usage of forward or backward selection would perform just as well, or better. The forward selection process begins with a null and then iteratively adds a variable that maximizes the criteria in a step-wise fashion (the backward selection beginning with the full model and going in reverse). The two criterion used here will be the Akaike Information Criterion (AIC) and the Bayesian Information Criteria (BIC).
 
 In the case of AIC we are fitting to minimize the following:
 
@@ -252,28 +261,43 @@ $$
 
 where $n$ is the number of observations.
 
-Let's fit our models:
+In order to perform the following procedures in an environment with limited storage resources, we'll have to subset the original data significantly given that ```R``` tends to store all of its objects in memory. Even only using 0.05% of our data will still leave us with 181,171 observations, which should be more than enough for our purposes.
 
-```{r backward_fit}
-# https://stackoverflow.com/questions/15260429/is-there-a-way-to-compress-an-lm-object-for-later-prediction
-full_lm <- lm(form, data = df[train_mask,]) # why is the output almost 10Gb?
-fit_AIC <- step(full_lm, directon = "backward", k = 2)
-fit_BIC <- step(full_lm, direction = "backward", k = log(n))
+Let's fit our models, by first fitting the full model (which is required by ```step()```:
+
+```{r full_fit}
+SUBSET_SIZE <- .005
+sub_mask    <- sample.int(n = nrow(df), size = floor(nrow(df) * SUBSET_SIZE), replace = F)
+sub_df      <- df[sub_mask,]
+test_mask   <- sample.int(n = nrow(df[-sub_mask,]), size = nrow(df[-sub_mask,]) * SUBSET_SIZE, replace = F)
+test_df     <- df[setdiff(sub_mask, test_mask),]
+
+full_lm     <- lm(form, data = sub_df)
+summary(full_lm)
+```
+
+```{r stepwise}
+fit_forward  <- MASS::stepAIC(full_lm, direction = "forward")
+fit_backward <- MASS::stepAIC(full_lm, direction = "backward")
+```
+
+```{r anova}
+fit_forward$anova; fit_backward$anova
 ```
 
 And we can now compare them to our performance using the LASSO and Ridge results from Part 4.
 
-```{r backward_performance}
-# predict on test set
-predict_df$y_AIC <- predict()
-predict_df$y_BIC <- predict
+```{r stepwise_performance}
+# predict step-wise on test set
+y_forward  <- predict(fit_forward, test_df, type = "response")
+y_backward <- predict(fit_backward, test_df, type = "response")
 
-# error
-print(list(
-  base_error = rmse(df$sst_act[-train_mask], df$sst_reg[-train_mask]),
-  AIC_error = rmse(df$sst_act[-train_mask], predict_df$y_AIC),
-  BIC_error = rmse(df$sst_act[-train_mask], predict_df$y_BIC)
-))
-
-# visualize error 
+list(
+  forward_rmse = rmse(test_df$sst_act, y_forward),
+  backward_rmse = rmse(test_df$sst_act, y_backward),
+  forward_nrmse = nrmse(test_df$sst_act, y_forward),
+  backward_rmse = nrmse(test_df$sst_act, y_backward)
+)
 ```
+
+So, this procedure generates a model that is more accurate than those determined by the LASSO & Ridge procedures (though again fit on a much smaller subset of data). We did not test the error on the entire dataset, which may explain the robust performance. That said, it appears to approximate the error of the current model.
