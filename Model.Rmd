@@ -9,6 +9,7 @@ library(ncdf4)
 library(glmnet)
 library(MASS)
 library(biglm)
+library(gtools)
 ```
 
 ### Data Input
@@ -21,6 +22,7 @@ locations  <- c("../data/matchups_NPP_2018-01.nc", "../data/matchups_NPP_2018-02
 
 # pull in the variables from the files and bind together
 bright_3.7 <- vector("numeric")
+bright_4   <- vector("numeric")
 bright_8.6 <- vector("numeric")
 bright_11  <- vector("numeric")
 bright_12  <- vector("numeric")
@@ -33,6 +35,7 @@ for( loc in locations ) {
   open_file  <- nc_open(loc)
   sza        <- c(sza, ncvar_get(open_file, 'sza'))
   bright_3.7 <- c(bright_3.7, ncvar_get(open_file, 'BT_M12'))
+  bright_4   <- c(bright_4, ncvar_get(open_file, 'BT_M13'))
   bright_8.6 <- c(bright_8.6, ncvar_get(open_file, 'BT_M14'))
   bright_11  <- c(bright_11, ncvar_get(open_file, 'BT_M15'))
   bright_12  <- c(bright_12, ncvar_get(open_file, 'BT_M16'))
@@ -43,20 +46,21 @@ for( loc in locations ) {
 }
 
 # create data frame
-df    <- data.frame(bright_3.7 = bright_3.7, bright_8.6 = bright_8.6, bright_11 = bright_11,
+df    <- data.frame(bright_3.7 = bright_3.7, bright_4 = bright_4, bright_8.6 = bright_8.6, bright_11 = bright_11,
                     bright_12 = bright_12, sec_theta = sec_theta, sst_ref = sst_ref, sst_reg = sst_reg,
                     sst_act = sst_act, sza = sza)
 # indicator of whether it's day time
 df$is_day   <- as.integer(df$sza < 95)
 
 # clean out memory by removing all the vectors from this step
-rm(open_file, bright_3.7, bright_8.6, bright_11, bright_12, sec_theta, sst_ref, sst_reg, sst_act, sza)
+rm(open_file, bright_3.7, bright_4, bright_8.6, bright_11, bright_12, sec_theta, sst_ref, sst_reg, sst_act, sza)
 gc(verbose = F)
 ```
 
 ```{r }
 # what does df look like?
 head(df)
+summary(df)
 ```
 
 ### Model Introduction
@@ -85,17 +89,145 @@ $$
 
 where $T_{ref}$ is a best-first-guess SST value and $\sec\theta$ is the satellite zenith angle. 
 
-### Part 1
+For the below analysis, given a limited amount of resources available, we must pull out random subsets from our data in order to fit the models. Below, we'll construct a mask of training & testing data (they have no intersection) of approximately 10% of the original data. Given that ```R``` stores its objects in RAM, it's not possible to do fittings much larger.
 
+```{r}
+set.seed(42)
+TRAIN_SIZE <- .1
+train_mask <- sample.int(n = nrow(df), size = floor(nrow(df) * TRAIN_SIZE), replace = F)
+TEST_SIZE  <- .1
+test_mask  <- setdiff(sample.int(n = nrow(df), size = floor(nrow(df) * TEST_SIZE), replace = F), train_mask)
 
+# how large is our test set?
+length(test_mask)/nrow(df)
+```
+
+### Part 1 << Md >>
+
+<< Include >>
 
 ### Part 2
 
+Walton et al. (1988) proposed the following model to estimate sst:
 
+$$
+T_S=b_0+b_1T_{\lambda_i}+b_2(T_{\lambda_i}-T_{\lambda_j})T_{ref}+b_3(T_{\lambda_i}-T_{\lambda_j})(\sec\theta-1)
+$$
+
+Here, we must find the best channels $T_{\lambda_i}$ and $T_{\lambda_j}$ which is possible to do by exhaustive search just the small search space. Then, we can pick the best model by investigating the mean squared error and performance on the outstanding test set.
+
+<< What's the code below for? >>
+
+```{r}
+x <- rnorm(20)
+y <- 7 * x^2 - 0.5 * x + rnorm(20)
+poly.formulae <- c("y~1", paste("y ~ poly(x,", 1:9, ")", sep=""))
+poly.formulae[[3]]
+typeof(poly.formulae[[2]])
+poly.formulae <- sapply(poly.formulae,as.formula)
+fitted.models <- list(length=length(poly.formulae))
+for (model_index in 1:length(poly.formulae)) {
+  fm <- lm(formula = poly.formulae[[model_index]])
+  fitted.models[[model_index]] <-fm
+}
+fitted.models[3]
+```
+
+Now, let's permutate the channels and see their performance.
+
+```{r}
+#Setting up pair of I and J for the model
+x          <- c('bright_3.7', 'bright_4', 'bright_8.6', 'bright_11', 'bright_12')
+p          <- gtools::permutations( n = 5, r = 2, v = x)
+mse.models.is <- vector("list", length = nrow(p))
+mse.models.os <- vector("list", length = nrow(p))
+for (index in 1:nrow(p)) {
+  formula             <- as.formula(paste("sst_act ~", toString(p[index,1]),
+                                   "+I(",toString(p[index,1]),"-",toString(p[index,2]),"):sst_ref", sep=""))
+  linear.model        <- lm(formula = formula, data = df[train_mask,])
+  prediction          <- predict(linear.model, df[test_mask,], type = "response")
+  mse.models.is[[index]] <- mean(residuals(linear.model)^2)
+  mse.models.os[[index]] <- mean( (prediction - df[test_mask,]$sst_act)^2 )
+}
+rm(linear.model, X_test, prediction)  # memory management
+# operational model error
+op_error <- mean( (df[test_mask,]$sst_act - df[test_mask,]$sst_reg)^2 )
+op_error
+```
+
+Now, let's see which model minimizes in-sample and out-of-sample performance:
+
+```{r}
+plot(1:20, mse.models.is, type = "b", main = "In-Sample Performance", xlab = "Index")
+plot(1:20, mse.models.os, type = "b", main = "Out-of-Sample Performance", xlab = "Index")
+```
 
 ### Part 3
 
+To perform a subset selection of the predcitors for the model below, 
 
+$$
+T_S=b_0+b_1T_{\lambda_i}+b_2(T_{\lambda_i}-T_{\lambda_j})T_{ref}+b_3(T_{\lambda_i}-T_{\lambda_j})(\sec\theta-1)+b_4T_{ref}
+$$
+
+we will use the best subset algorithm, which gives the total of possible models that can be created from $p$ variables selecting $k$ number of predictors.
+
+$$
+{p \choose k}=\frac{p!}{k!(p-k)!}
+$$
+
+#### Data Preparation
+
+Due to our model consist of three predictors and two of the predictors is the difference between two variables. To calculate the total number of variables in our data, it is necessary to violate the Best subset selection algorithm. This algorithm is limited to analyze sets of pairs. It does not hold for pair repetition. In our model each variable is used twiced if and only if both the variables have different wavelengths. In other words, the model stablishes a different order each time a variable is used. To assert the total of possible models, mathematically this can be expressed as:
+
+
+$$
+k!{p \choose k} = \frac{p!}{(p-k)!}
+$$
+
+To account for the order of each variable used, it is comvenient to estimate the amount of possible by permutation instead of combinations. In total we will have 20 possible models, from which the model with the highest adjusted $R^2_{adj}$ will be selected. 
+
+```{r Data Preparation}
+#permutation of all possible variables combination for the model
+x     <- c('bright_3.7', 'bright_4', 'bright_8.6', 'bright_11', 'bright_12')
+p     <- 5
+k     <- 2
+permu <- data.frame(gtools::permutations(n = p, r = k, v = x))
+```
+
+```{r}
+# Dimensions of the sample
+print(dim(df[train_mask,]))
+# Dimensions of the permutation
+print(dim(permu))
+# Permutation data frame
+print(permu)
+```
+
+#### Model Selection
+To select the best model, the goal is to identify the model with maximum adjusted $R^{2}$. We developed an algorithm to extract $R^{2}$ from each possible model.
+
+```{r Model Selection}
+# Storage lists set up
+adj_rs <- vector("numeric")
+os_err <- vector("numeric")
+
+# loop through permutations of model
+for (index in 1:nrow(permu)) {
+  formula <- as.formula(paste("sst_act ~", toString(permu[index, 1]), "+I(",toString(permu[index,1]), "-",                                         toString(permu[index, 2]), ")+ I(", toString(permu[index,1]), "-",
+                              toString(permu[index, 2]), "):sec_theta", "+ sst_ref", sep=""))
+  model               <- lm(formula = formula, data = df[train_mask,])
+  prediction          <- predict(model, df[test_mask,], type = "response")
+  adj_rs[[index]]     <- summary(model)$adj.r.squared
+  os_err[[index]]     <- mean( (df[test_mask,]$sst_act - prediction)^2 )
+}
+rm(model, prediction) # memory management
+
+dff <- data.frame(permutations = permu, adjusted_R2= adj_rs, OS_error = os_err)
+op_error; dff
+```
+
+Based on the results, it can be concluded all models provide the same accuracy of prediction. Note that the adjusted $R^{2}$ for each of our model is extremetly close to one.
 
 ### Part 4
 Adding further variables and segmenting the model based on whether it's day or night using the solar zenith angel ```sza``` to threshold, we can enrich our model which then requires the estimation of 14 parameters.
@@ -159,9 +291,6 @@ So, ```alpha=1``` simplifies to the LASSO penalty and ```alpha=0``` simplifies t
 
 ```{r model_prep}
 # split into train & test sets for more robust performance evaluation
-set.seed(42)
-TRAIN_SIZE  <- .7
-train_mask  <- sample.int(n = nrow(df), size = floor(nrow(df) * TRAIN_SIZE), replace = F)
 form        <- formula(sst_act ~ bright_11 + diff_11_3.7 + diff_11_8.6 + diff_11_12 + 
                      bright_11:sec_theta + diff_11_3.7:sec_theta + diff_11_8.6:sec_theta + diff_11_12:sec_theta +
                      bright_11:sst_ref + diff_11_3.7:sst_ref + diff_11_8.6:sst_ref + diff_11_12:sst_ref)
@@ -179,14 +308,14 @@ rm(X_train, y_train) # memory management
 
 ```{r pred}
 rm(X_train, y_train) # memory management
-X_test         <- model.matrix(form, df[-train_mask,])
-y_test         <- as.matrix(df$sst_act[-train_mask], ncol = 1)
+X_test         <- model.matrix(form, df[test_mask,])
+y_test         <- as.matrix(df$sst_act[test_mask], ncol = 1)
 
 # predict 
 predict_df         <- data.frame(y_actual = y_test)
 predict_df$y_lasso <- predict(fit_lasso, X_test, s = min(fit_lasso$lambda), type = "response")
 predict_df$y_ridge <- predict(fit_ridge, X_test, s = min(fit_ridge$lambda), type = "response")
-rm(X_test, y_test); gc(verbose=F) # memory management
+rm(X_test, y_test) # memory management
 head(predict_df)
 ```
 
@@ -209,12 +338,12 @@ nrmse <- function(y_act, y_pred) {
 }
 
 error_list <- list(
-  base_rmse = rmse(df$sst_act[-train_mask], df$sst_reg[-train_mask]),
-  lasso_rmse = rmse(df$sst_act[-train_mask], predict_df$y_lasso),
-  ridge_rmse = rmse(df$sst_act[-train_mask], predict_df$y_ridge),
-  base_nrmse = nrmse(df$sst_act[-train_mask], df$sst_reg[-train_mask]), 
-  lasso_nrmse = nrmse(df$sst_act[-train_mask], predict_df$y_lasso),
-  ridge_rmse = nrmse(df$sst_act[-train_mask], predict_df$y_ridge)
+  base_rmse = rmse(df$sst_act[test_mask], df$sst_reg[test_mask]),
+  lasso_rmse = rmse(df$sst_act[test_mask], predict_df$y_lasso),
+  ridge_rmse = rmse(df$sst_act[test_mask], predict_df$y_ridge),
+  base_nrmse = nrmse(df$sst_act[test_mask], df$sst_reg[test_mask]), 
+  lasso_nrmse = nrmse(df$sst_act[test_mask], predict_df$y_lasso),
+  ridge_rmse = nrmse(df$sst_act[test_mask], predict_df$y_ridge)
 )
 error_list
 ```
@@ -244,7 +373,7 @@ hist(predict_df$y_lasso - predict_df$y_actual, main = "LASSO Regression Residual
 
 In both cases, they appear to be relatively normal, which should provide us with further confidence that our model is justifiable. 
 
-### Part 5
+### Part 5 
 Returning to our model that segments depending on time of day from Part 4, perhaps the usage of forward or backward selection would perform just as well, or better. The forward selection process begins with a null and then iteratively adds a variable that maximizes the criteria in a step-wise fashion (the backward selection beginning with the full model and going in reverse). The two criterion used here will be the Akaike Information Criterion (AIC) and the Bayesian Information Criteria (BIC).
 
 In the case of AIC we are fitting to minimize the following:
@@ -266,13 +395,7 @@ In order to perform the following procedures in an environment with limited stor
 Let's fit our models, by first fitting the full model (which is required by ```step()```:
 
 ```{r full_fit}
-SUBSET_SIZE <- .005
-sub_mask    <- sample.int(n = nrow(df), size = floor(nrow(df) * SUBSET_SIZE), replace = F)
-sub_df      <- df[sub_mask,]
-test_mask   <- sample.int(n = nrow(df[-sub_mask,]), size = nrow(df[-sub_mask,]) * SUBSET_SIZE, replace = F)
-test_df     <- df[setdiff(sub_mask, test_mask),]
-
-full_lm     <- lm(form, data = sub_df)
+full_lm     <- lm(form, data = df[train_mask,])
 summary(full_lm)
 ```
 
@@ -289,14 +412,14 @@ And we can now compare them to our performance using the LASSO and Ridge results
 
 ```{r stepwise_performance}
 # predict step-wise on test set
-y_forward  <- predict(fit_forward, test_df, type = "response")
-y_backward <- predict(fit_backward, test_df, type = "response")
+y_forward  <- predict(fit_forward, df[test_mask,], type = "response")
+y_backward <- predict(fit_backward, df[test_mask,], type = "response")
 
 list(
-  forward_rmse = rmse(test_df$sst_act, y_forward),
-  backward_rmse = rmse(test_df$sst_act, y_backward),
-  forward_nrmse = nrmse(test_df$sst_act, y_forward),
-  backward_rmse = nrmse(test_df$sst_act, y_backward)
+  forward_rmse = rmse(df[test_mask,]$sst_act, y_forward),
+  backward_rmse = rmse(df[test_mask,]$sst_act, y_backward),
+  forward_nrmse = nrmse(df[test_mask,]$sst_act, y_forward),
+  backward_rmse = nrmse(df[test_mask,]$sst_act, y_backward)
 )
 ```
 
