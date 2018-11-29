@@ -1,6 +1,11 @@
 ---
 title: "Project_3_SST"
 output: html_document
+author:
+- Tony Hoang
+- Carlos Martinez
+- Md Ali Sarker
+- Thomas Duffy
 ---
 
 ```{r setup, include=FALSE}
@@ -10,6 +15,7 @@ library(glmnet)
 library(MASS)
 library(biglm)
 library(gtools)
+library(leaps)
 ```
 
 ### Data Input
@@ -102,9 +108,17 @@ test_mask  <- setdiff(sample.int(n = nrow(df), size = floor(nrow(df) * TEST_SIZE
 length(test_mask)/nrow(df)
 ```
 
-### Part 1 << Md >>
+### Part 1
 
-<< Include >>
+```{r}
+df_task_1 = data.frame(df$bright_3.7, df$bright_4, df$bright_8.6, df$bright_11, df$bright_12, df$sst_act)
+names(df_task_1) <- c("BT_M12","BT_M13","BT_M14","BT_M15","BT_M16","sst_insitu")
+
+leaps <- regsubsets(sst_insitu ~ ., data = df_task_1[train_mask,], nbest = 2, method = "exhaustive")
+summary(leaps)
+
+plot(leaps, scale = "adjr2")
+```
 
 ### Part 2
 
@@ -116,27 +130,10 @@ $$
 
 Here, we must find the best channels $T_{\lambda_i}$ and $T_{\lambda_j}$ which is possible to do by exhaustive search just the small search space. Then, we can pick the best model by investigating the mean squared error and performance on the outstanding test set.
 
-<< What's the code below for? >>
-
-```{r}
-x <- rnorm(20)
-y <- 7 * x^2 - 0.5 * x + rnorm(20)
-poly.formulae <- c("y~1", paste("y ~ poly(x,", 1:9, ")", sep=""))
-poly.formulae[[3]]
-typeof(poly.formulae[[2]])
-poly.formulae <- sapply(poly.formulae,as.formula)
-fitted.models <- list(length=length(poly.formulae))
-for (model_index in 1:length(poly.formulae)) {
-  fm <- lm(formula = poly.formulae[[model_index]])
-  fitted.models[[model_index]] <-fm
-}
-fitted.models[3]
-```
-
 Now, let's permutate the channels and see their performance.
 
 ```{r}
-#Setting up pair of I and J for the model
+# setting up pair of I and J for the model
 x          <- c('bright_3.7', 'bright_4', 'bright_8.6', 'bright_11', 'bright_12')
 p          <- gtools::permutations( n = 5, r = 2, v = x)
 mse.models.is <- vector("list", length = nrow(p))
@@ -178,17 +175,16 @@ $$
 
 #### Data Preparation
 
-Due to our model consist of three predictors and two of the predictors is the difference between two variables. To calculate the total number of variables in our data, it is necessary to violate the Best subset selection algorithm. This algorithm is limited to analyze sets of pairs. It does not hold for pair repetition. In our model each variable is used twiced if and only if both the variables have different wavelengths. In other words, the model stablishes a different order each time a variable is used. To assert the total of possible models, mathematically this can be expressed as:
-
+Due to our model consist of three predictors and two of the predictors is the difference between two variables. To calculate the total number of variables in our data, it is necessary to violate the Best subset selection algorithm. This algorithm is limited to analyze sets of pairs. It does not hold for pair repetition. In our model each variable is used twiced if and only if both the variables have different wavelengths. In other words, the model establishes a different order each time a variable is used. To assert the total of possible models, mathematically this can be expressed as:
 
 $$
 k!{p \choose k} = \frac{p!}{(p-k)!}
 $$
 
-To account for the order of each variable used, it is comvenient to estimate the amount of possible by permutation instead of combinations. In total we will have 20 possible models, from which the model with the highest adjusted $R^2_{adj}$ will be selected. 
+To account for the order of each variable used, it is convenient to estimate the amount of possible by permutation instead of combinations. In total we will have 20 possible models, from which the model with the highest adjusted $R^2_{adj}$ will be selected. 
 
 ```{r Data Preparation}
-#permutation of all possible variables combination for the model
+# permutation of all possible variables combination for the model
 x     <- c('bright_3.7', 'bright_4', 'bright_8.6', 'bright_11', 'bright_12')
 p     <- 5
 k     <- 2
@@ -423,4 +419,4 @@ list(
 )
 ```
 
-So, this procedure generates a model that is more accurate than those determined by the LASSO & Ridge procedures (though again fit on a much smaller subset of data). We did not test the error on the entire dataset, which may explain the robust performance. That said, it appears to approximate the error of the current model.
+So, this procedure generates a model that is more accurate than those determined by the LASSO & Ridge procedures (though again fit on a much smaller subset of data). We did not test the error on the entire dataset, which may explain the robust performance. That said, it appears to approximate the error of the current model, perhaps performing slightly better. It does not, however, remove any of the variables from the fully enriched model form.
