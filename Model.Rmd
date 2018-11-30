@@ -4,7 +4,7 @@ output: html_document
 author:
 - Tony Hoang
 - Carlos Martinez
-- Md Ali Sarker
+- Md Ayub Ali Sarker
 - Thomas Duffy
 ---
 
@@ -60,13 +60,11 @@ df$is_day   <- as.integer(df$sza < 95)
 
 # clean out memory by removing all the vectors from this step
 rm(open_file, bright_3.7, bright_4, bright_8.6, bright_11, bright_12, sec_theta, sst_ref, sst_reg, sst_act, sza)
-gc(verbose = F)
 ```
 
 ```{r }
 # what does df look like?
 head(df)
-summary(df)
 ```
 
 ### Model Introduction
@@ -118,6 +116,7 @@ leaps <- regsubsets(sst_insitu ~ ., data = df_task_1[train_mask,], nbest = 2, me
 summary(leaps)
 
 plot(leaps, scale = "adjr2")
+rm(df_task_1)
 ```
 
 ### Part 2
@@ -130,38 +129,68 @@ $$
 
 Here, we must find the best channels $T_{\lambda_i}$ and $T_{\lambda_j}$ which is possible to do by exhaustive search just the small search space. Then, we can pick the best model by investigating the mean squared error and performance on the outstanding test set.
 
-Now, let's permutate the channels and see their performance.
-
+Setting up all possible pairs of I and J for the model. There are 20 possible combinations
 ```{r}
-# setting up pair of I and J for the model
-x          <- c('bright_3.7', 'bright_4', 'bright_8.6', 'bright_11', 'bright_12')
-p          <- gtools::permutations( n = 5, r = 2, v = x)
-mse.models.is <- vector("list", length = nrow(p))
-mse.models.os <- vector("list", length = nrow(p))
-for (index in 1:nrow(p)) {
-  formula             <- as.formula(paste("sst_act ~", toString(p[index,1]),
-                                   "+I(",toString(p[index,1]),"-",toString(p[index,2]),"):sst_ref", sep=""))
-  linear.model        <- lm(formula = formula, data = df[train_mask,])
-  prediction          <- predict(linear.model, df[test_mask,], type = "response")
-  mse.models.is[[index]] <- mean(residuals(linear.model)^2)
-  mse.models.os[[index]] <- mean( (prediction - df[test_mask,]$sst_act)^2 )
+x <- c('bright_3.7','bright_4','bright_8.6','bright_11','bright_12')
+perm <- gtools::permutations( n = 5, r = 2, v = x)
+
+#Generating all possible linear formula with pair of I and J (20 formula total)
+formula <- list( length = nrow(perm))
+for (index in 1:nrow(perm)) {
+  formula[[index]] <- as.formula(c(paste("sst_act~",toString(perm[index,1]),
+                     "+I(",toString(perm[index,1]),"-",toString(perm[index,2]),"):sst_reg",sep="")))
 }
-rm(linear.model, X_test, prediction)  # memory management
-# operational model error
-op_error <- mean( (df[test_mask,]$sst_act - df[test_mask,]$sst_reg)^2 )
-op_error
+head(formula)
 ```
 
-Now, let's see which model minimizes in-sample and out-of-sample performance:
-
+Setting up n-fold Cross-Validation:
 ```{r}
-plot(1:20, mse.models.is, type = "b", main = "In-Sample Performance", xlab = "Index")
-plot(1:20, mse.models.os, type = "b", main = "Out-of-Sample Performance", xlab = "Index")
+nfolds <- 5
+fold.labels <- sample(rep(1:nfolds, length = floor(nrow(df)) * TEST_SIZE), replace = F)
+
+#Setting up MSE matrix with formula as column names and n-fold as row label
+mse.models <- matrix(NA, nrow = nfolds, ncol = nrow(perm))
+colnames(mse.models) <- as.character(formula)
+
+#Running CV:
+for (fold in 1:nfolds) {
+  test.rows <- setdiff(which(fold.labels==fold), train_mask)
+  for (form in formula) {
+    current.model <- lm(formula = form, data = df[test.rows,])
+    predictions <- predict(current.model, newdata = df[test_mask,])
+    mse.models[fold, as.character(c(form))] <- mean((df[test_mask,]$sst_act - predictions)^2)
+  }
+}
+rm(current.model, predictions)
+
+#CV results:
+cv.results <- as.matrix(colMeans(mse.models))
+cv.results
 ```
+
+Plotting the result for model comparison:
+```{r}
+plot(1:20, cv.results, xlab = "models", ylab = "MSE", main = "MSE results for CV with 5 fold", type = "b")
+```
+
+The model that has the lowest MSE is with I = 12 and J = 11
+```{r}
+names(cv.results[which.min(cv.results),])
+mse.model <- cv.results[which.min(cv.results)]
+mse.model
+```
+
+Checking the performance of the operational model, measured by MSE:
+```{r}
+mse.Top = mean((df$sst_reg - df$sst_act)^2)
+mse.Top 
+```
+
+The MSE of the operational model is much lower than the selected model. Therefore, the selected model is not performing as well.
 
 ### Part 3
 
-To perform a subset selection of the predcitors for the model below, 
+To perform a subset selection of the predicitors for the model below, 
 
 $$
 T_S=b_0+b_1T_{\lambda_i}+b_2(T_{\lambda_i}-T_{\lambda_j})T_{ref}+b_3(T_{\lambda_i}-T_{\lambda_j})(\sec\theta-1)+b_4T_{ref}
@@ -219,8 +248,8 @@ for (index in 1:nrow(permu)) {
 }
 rm(model, prediction) # memory management
 
-dff <- data.frame(permutations = permu, adjusted_R2= adj_rs, OS_error = os_err)
-op_error; dff
+dff <- data.frame(permutations = permu, adjusted_R2 = adj_rs, OS_error = os_err)
+mse.Top; dff
 ```
 
 Based on the results, it can be concluded all models provide the same accuracy of prediction. Note that the adjusted $R^{2}$ for each of our model is extremetly close to one.
@@ -303,7 +332,6 @@ rm(X_train, y_train) # memory management
 ```
 
 ```{r pred}
-rm(X_train, y_train) # memory management
 X_test         <- model.matrix(form, df[test_mask,])
 y_test         <- as.matrix(df$sst_act[test_mask], ncol = 1)
 
@@ -312,7 +340,6 @@ predict_df         <- data.frame(y_actual = y_test)
 predict_df$y_lasso <- predict(fit_lasso, X_test, s = min(fit_lasso$lambda), type = "response")
 predict_df$y_ridge <- predict(fit_ridge, X_test, s = min(fit_ridge$lambda), type = "response")
 rm(X_test, y_test) # memory management
-head(predict_df)
 ```
 
 What about their prediction accuracy on the test set? How is it compared to the error from the operational model? Let's use the root-mean squared error over our test set as the metric, which has the form:
@@ -419,4 +446,4 @@ list(
 )
 ```
 
-So, this procedure generates a model that is more accurate than those determined by the LASSO & Ridge procedures (though again fit on a much smaller subset of data). We did not test the error on the entire dataset, which may explain the robust performance. That said, it appears to approximate the error of the current model, perhaps performing slightly better. It does not, however, remove any of the variables from the fully enriched model form.
+So, this procedure generates a model that is more accurate than those determined by the LASSO & Ridge procedures (though again fit on a much smaller subset of data). We did not test the error on the entire dataset, which may explain the robust performance. That said, it appears to approximate the error of the current model, perhaps performing slightly better. It should be noted using either forward or backward selection does not remove any of the variables from the fully enriched model form we began with.
